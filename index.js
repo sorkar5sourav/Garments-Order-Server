@@ -30,6 +30,7 @@ async function run() {
     const db = client.db("Garments-Order-Production-Tracker-db");
     const userCollection = db.collection("users");
     const productCollection = db.collection("products");
+    const orderCollection = db.collection("orders");
     //         const paymentCollection = db.collection('payments');
     //         const ridersCollection = db.collection('riders');
     //         const trackingsCollection = db.collection('trackings')
@@ -73,6 +74,54 @@ async function run() {
         res
           .status(500)
           .send({ message: "Error adding product", error: error.message });
+      }
+    });
+
+    // Post a new order
+    app.post("/orders", async (req, res) => {
+      try {
+        const orderData = req.body;
+        orderData.status = "pending"; // Set initial status
+        orderData.createdAt = new Date();
+
+        const result = await orderCollection.insertOne(orderData);
+        res.status(201).send({
+          message: "Order placed successfully",
+          orderId: result.insertedId,
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: "Error placing order",
+          error: error.message,
+        });
+      }
+    });
+
+    // Get all orders
+    app.get("/orders", async (req, res) => {
+      try {
+        const orders = await orderCollection.find({}).toArray();
+        res.send(orders);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching orders",
+          error: error.message,
+        });
+      }
+    });
+
+    // Get orders by email
+    app.get("/orders/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const orders = await orderCollection.find({ email }).toArray();
+        res.send(orders);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching orders",
+          error: error.message,
+        });
       }
     });
 
