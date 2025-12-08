@@ -29,7 +29,7 @@ async function run() {
     await client.connect();
     const db = client.db("Garments-Order-Production-Tracker-db");
     const userCollection = db.collection("users");
-    //         const parcelsCollection = db.collection('parcels');
+    const productCollection = db.collection("products");
     //         const paymentCollection = db.collection('payments');
     //         const ridersCollection = db.collection('riders');
     //         const trackingsCollection = db.collection('trackings')
@@ -47,6 +47,33 @@ async function run() {
 
       const result = await userCollection.insertOne(user);
       res.send(result);
+    });
+
+    // Get all products
+    app.get("/products", async (req, res) => {
+      try {
+        const products = await productCollection.find({}).toArray();
+        res.send(products);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error fetching products", error: error.message });
+      }
+    });
+
+    // Post a new product
+    app.post("/products", async (req, res) => {
+      try {
+        const product = req.body;
+        product.createdAt = new Date();
+
+        const result = await productCollection.insertOne(product);
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error adding product", error: error.message });
+      }
     });
 
     // Send a ping to confirm a successful connection
