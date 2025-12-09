@@ -58,10 +58,51 @@ async function run() {
       res.send({ role: user?.role || "user" });
     });
 
+    // admin - get all users
+    app.get("/users", async (_req, res) => {
+      try {
+        const users = await userCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(users);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error fetching users", error: error.message });
+      }
+    });
+
+    // admin - update user role / status
+    app.patch("/users/:id/role", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { role, status } = req.body;
+
+        const updateDoc = { $set: { updatedAt: new Date() } };
+        if (role) updateDoc.$set.role = role;
+        if (status) updateDoc.$set.status = status;
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(id) },
+          updateDoc
+        );
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error updating user", error: error.message });
+      }
+    });
+
     // Get all products
     app.get("/products", async (req, res) => {
       try {
-        const products = await productCollection.find({}).toArray();
+        const { createdBy } = req.query;
+        const query = {};
+        if (createdBy) query.createdBy = createdBy;
+
+        const products = await productCollection.find(query).toArray();
         res.send(products);
       } catch (error) {
         res
@@ -82,6 +123,40 @@ async function run() {
         res
           .status(500)
           .send({ message: "Error adding product", error: error.message });
+      }
+    });
+
+    // Update product
+    app.patch("/products/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updates = req.body || {};
+        updates.updatedAt = new Date();
+
+        const result = await productCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updates }
+        );
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error updating product", error: error.message });
+      }
+    });
+
+    // Delete product
+    app.delete("/products/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await productCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Error deleting product", error: error.message });
       }
     });
 
@@ -109,12 +184,14 @@ async function run() {
     // Get all orders
     app.get("/orders", async (req, res) => {
       try {
-        const email = req.query.email;
-        let query = {};
+        const { email, status } = req.query;
+        const query = {};
 
-        // If email is provided as query param, filter by email
         if (email) {
-          query = { email };
+          query.email = email;
+        }
+        if (status) {
+          query.status = status;
         }
 
         const orders = await orderCollection.find(query).toArray();
@@ -141,6 +218,20 @@ async function run() {
       }
     });
 
+    // Get order by id
+    app.get("/orders/id/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const order = await orderCollection.findOne({ _id: new ObjectId(id) });
+        res.send(order || {});
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching order",
+          error: error.message,
+        });
+      }
+    });
+
     // Delete an order
     app.delete("/orders/:id", async (req, res) => {
       try {
@@ -156,34 +247,114 @@ async function run() {
         });
       }
     });
+
+    // Update order status
+    app.patch("/orders/:id/status", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status, approvedAt } = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status,
+              updatedAt: new Date(),
+              ...(approvedAt ? { approvedAt: new Date(approvedAt) } : {}),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating order status",
+          error: error.message,
+        });
+      }
+    });
+
+    // Append tracking update to order
+    app.patch("/orders/:id/tracking", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const update = req.body || {};
+        const docUpdate = {
+          $push: { trackingUpdates: update },
+          $set: { updatedAt: new Date() },
+        };
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          docUpdate
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error adding tracking update",
+          error: error.message,
+        });
+      }
+    });
     // payment related apis
     app.post("/payment-checkout-session", async (req, res) => {
-      const parcelInfo = req.body;
-      const amount = parseInt(parcelInfo.cost) * 100;
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              unit_amount: amount,
-              product_data: {
-                name: `Please pay for: ${parcelInfo.parcelName}`,
-              },
-            },
-            quantity: 1,
-          },
-        ],
-        mode: "payment",
-        metadata: {
-          parcelId: parcelInfo.parcelId,
-          trackingId: parcelInfo.trackingId,
-        },
-        customer_email: parcelInfo.senderEmail,
-        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-      });
+      try {
+        const parcelInfo = req.body || {};
+        console.log("/payment-checkout-session called with:", parcelInfo);
 
-      res.send({ url: session.url });
+        // Validate required fields
+        const costValue =
+          parcelInfo.cost ?? parcelInfo.totalPrice ?? parcelInfo.amount;
+        const senderEmail = parcelInfo.senderEmail || parcelInfo.email;
+        if (!costValue || !senderEmail) {
+          return res
+            .status(400)
+            .send({ error: "Missing required fields: cost and senderEmail" });
+        }
+
+        // Convert to smallest currency unit (cents)
+        const amount = Math.round(Number(costValue) * 100);
+        if (isNaN(amount) || amount <= 0) {
+          return res.status(400).send({ error: "Invalid cost value" });
+        }
+
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                unit_amount: amount,
+                product_data: {
+                  name: `Please pay for: ${
+                    parcelInfo.parcelName || parcelInfo.productTitle || "Order"
+                  }`,
+                },
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          metadata: {
+            parcelId: parcelInfo.parcelId,
+            trackingId: parcelInfo.trackingId,
+          },
+          customer_email: senderEmail,
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        });
+
+        console.log("Stripe session created:", {
+          id: session.id,
+          url: session.url,
+        });
+        res.send({ url: session.url, id: session.id });
+      } catch (err) {
+        console.error("Error in /payment-checkout-session:", err);
+        // Return safe error to client
+        res
+          .status(500)
+          .send({
+            error: "Server error creating checkout session",
+            detail: err.message,
+          });
+      }
     });
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
