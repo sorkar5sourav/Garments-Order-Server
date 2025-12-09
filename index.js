@@ -3,7 +3,7 @@ const cors = require("cors");
 const app = express();
 require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-// const stripe = require("stripe")(process.env.STRIPE_SECRET);
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000;
 // const crypto = require("crypto");
@@ -31,10 +31,11 @@ async function run() {
     const userCollection = db.collection("users");
     const productCollection = db.collection("products");
     const orderCollection = db.collection("orders");
-    //         const paymentCollection = db.collection('payments');
+    const paymentCollection = db.collection("payments");
     //         const ridersCollection = db.collection('riders');
     //         const trackingsCollection = db.collection('trackings')
 
+    // users related apis
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.role = "user";
@@ -48,6 +49,13 @@ async function run() {
 
       const result = await userCollection.insertOne(user);
       res.send(result);
+    });
+
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
     });
 
     // Get all products
@@ -101,7 +109,15 @@ async function run() {
     // Get all orders
     app.get("/orders", async (req, res) => {
       try {
-        const orders = await orderCollection.find({}).toArray();
+        const email = req.query.email;
+        let query = {};
+
+        // If email is provided as query param, filter by email
+        if (email) {
+          query = { email };
+        }
+
+        const orders = await orderCollection.find(query).toArray();
         res.send(orders);
       } catch (error) {
         res.status(500).send({
@@ -111,7 +127,7 @@ async function run() {
       }
     });
 
-    // Get orders by email
+    // Get orders by email (legacy endpoint)
     app.get("/orders/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -125,6 +141,50 @@ async function run() {
       }
     });
 
+    // Delete an order
+    app.delete("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await orderCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error deleting order",
+          error: error.message,
+        });
+      }
+    });
+    // payment related apis
+    app.post("/payment-checkout-session", async (req, res) => {
+      const parcelInfo = req.body;
+      const amount = parseInt(parcelInfo.cost) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              unit_amount: amount,
+              product_data: {
+                name: `Please pay for: ${parcelInfo.parcelName}`,
+              },
+            },
+            quantity: 1,
+          },
+        ],
+        mode: "payment",
+        metadata: {
+          parcelId: parcelInfo.parcelId,
+          trackingId: parcelInfo.trackingId,
+        },
+        customer_email: parcelInfo.senderEmail,
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      });
+
+      res.send({ url: session.url });
+    });
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
