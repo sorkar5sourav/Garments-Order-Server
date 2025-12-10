@@ -58,11 +58,31 @@ async function run() {
       res.send({ role: user?.role || "user" });
     });
 
-    // admin - get all users
-    app.get("/users", async (_req, res) => {
+    // admin - get all users (supports search and filters via query params)
+    app.get("/users", async (req, res) => {
       try {
+        const { search, role, status } = req.query;
+        const query = {};
+
+        if (search) {
+          const regex = new RegExp(search, "i");
+          query.$or = [
+            { displayName: regex },
+            { name: regex },
+            { email: regex },
+          ];
+        }
+
+        if (role && role !== "all") {
+          query.role = role;
+        }
+
+        if (status && status !== "all") {
+          query.status = status;
+        }
+
         const users = await userCollection
-          .find({})
+          .find(query)
           .sort({ createdAt: -1 })
           .toArray();
         res.send(users);
@@ -248,6 +268,29 @@ async function run() {
       }
     });
 
+    // Generic update order endpoint
+    app.patch("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updateData = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              ...updateData,
+              updatedAt: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating order",
+          error: error.message,
+        });
+      }
+    });
+
     // Update order status
     app.patch("/orders/:id/status", async (req, res) => {
       try {
@@ -348,12 +391,10 @@ async function run() {
       } catch (err) {
         console.error("Error in /payment-checkout-session:", err);
         // Return safe error to client
-        res
-          .status(500)
-          .send({
-            error: "Server error creating checkout session",
-            detail: err.message,
-          });
+        res.status(500).send({
+          error: "Server error creating checkout session",
+          detail: err.message,
+        });
       }
     });
     // Send a ping to confirm a successful connection
