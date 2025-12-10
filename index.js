@@ -382,7 +382,65 @@ async function run() {
           success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
         });
+        app.patch("/payment-success", async (req, res) => {
+          const sessionId = req.query.session_id;
+          const session = await stripe.checkout.sessions.retrieve(sessionId);
 
+          // console.log('session retrieve', session)
+          const transactionId = session.payment_intent;
+          const query = { transactionId: transactionId };
+
+          const paymentExist = await paymentCollection.findOne(query);
+          // console.log(paymentExist);
+          if (paymentExist) {
+            return res.send({
+              message: "already exists",
+              transactionId,
+              trackingId: paymentExist.trackingId,
+            });
+          }
+
+          // use the previous tracking id created during the parcel create which was set to the session metadata during session creation
+          const trackingId = session.metadata.trackingId;
+
+          if (session.payment_status === "paid") {
+            const id = session.metadata.parcelId;
+            const query = { _id: new ObjectId(id) };
+            const update = {
+              $set: {
+                paymentStatus: "paid",
+                deliveryStatus: "pending-pickup",
+              },
+            };
+
+            const result = await parcelsCollection.updateOne(query, update);
+
+            const payment = {
+              amount: session.amount_total / 100,
+              currency: session.currency,
+              customerEmail: session.customer_email,
+              parcelId: session.metadata.parcelId,
+              parcelName: session.metadata.parcelName,
+              transactionId: session.payment_intent,
+              paymentStatus: session.payment_status,
+              paidAt: new Date(),
+              trackingId: trackingId,
+            };
+
+            const resultPayment = await paymentCollection.insertOne(payment);
+
+            logTracking(trackingId, "parcel_paid");
+
+            return res.send({
+              success: true,
+              modifyParcel: result,
+              trackingId: trackingId,
+              transactionId: session.payment_intent,
+              paymentInfo: resultPayment,
+            });
+          }
+          return res.send({ success: false });
+        });
         console.log("Stripe session created:", {
           id: session.id,
           url: session.url,
