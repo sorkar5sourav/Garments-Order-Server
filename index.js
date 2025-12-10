@@ -2,15 +2,39 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
+const crypto = require("crypto");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000;
-// const crypto = require("crypto");
-// middleware
+var admin = require("firebase-admin");
+
+// Load Firebase service account from environment
+let serviceAccount;
+try {
+  const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+    "utf8"
+  );
+  serviceAccount = JSON.parse(decoded);
+} catch (err) {
+  // Fallback to local file if env var not available
+  serviceAccount = require("./garments-order-tracker-firebase-adminsdk-fbsvc-7dec8bc60d.json");
+}
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+function generateTrackingId() {
+  const prefix = "PRCL"; // your brand prefix
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6-char random hex
+
+  return `${prefix}-${date}-${random}`;
+}
+
 app.use(express.json());
 app.use(cors());
-// const admin = require("firebase-admin");
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jskgf2c.mongodb.net/?appName=Cluster0`;
 
@@ -22,7 +46,23 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   },
 });
+const verifyFBToken = async (req, res, next) => {
+  const token = req.headers.authorization;
 
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    console.log("decoded in the token", decoded);
+    req.decoded_email = decoded.email;
+    next();
+  } catch (err) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+};
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
@@ -180,11 +220,12 @@ async function run() {
       }
     });
 
-    // Post a new order
-    app.post("/orders", async (req, res) => {
+    // Post a new order (protected)
+    app.post("/orders", verifyFBToken, async (req, res) => {
       try {
         const orderData = req.body;
-        orderData.status = "pending"; // Set initial status
+        orderData.status = "pending"; // Admin approval status
+        orderData.paymentStatus = "unpaid"; // Payment status - user can pay without approval
         orderData.createdAt = new Date();
 
         const result = await orderCollection.insertOne(orderData);
@@ -201,8 +242,8 @@ async function run() {
       }
     });
 
-    // Get all orders
-    app.get("/orders", async (req, res) => {
+    // Get all orders (protected)
+    app.get("/orders", verifyFBToken, async (req, res) => {
       try {
         const { email, status } = req.query;
         const query = {};
@@ -224,8 +265,8 @@ async function run() {
       }
     });
 
-    // Get orders by email (legacy endpoint)
-    app.get("/orders/:email", async (req, res) => {
+    // Get orders by email (protected - legacy endpoint)
+    app.get("/orders/:email", verifyFBToken, async (req, res) => {
       try {
         const email = req.params.email;
         const orders = await orderCollection.find({ email }).toArray();
@@ -252,8 +293,22 @@ async function run() {
       }
     });
 
-    // Delete an order
-    app.delete("/orders/:id", async (req, res) => {
+    // Get order by trackingId (protected)
+    app.get("/orders/track/:trackingId", verifyFBToken, async (req, res) => {
+      try {
+        const trackingId = req.params.trackingId;
+        const order = await orderCollection.findOne({ trackingId });
+        res.send(order || {});
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching order by trackingId",
+          error: error.message,
+        });
+      }
+    });
+
+    // Delete an order (protected)
+    app.delete("/orders/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
         const result = await orderCollection.deleteOne({
@@ -268,8 +323,8 @@ async function run() {
       }
     });
 
-    // Generic update order endpoint
-    app.patch("/orders/:id", async (req, res) => {
+    // Generic update order endpoint (protected)
+    app.patch("/orders/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
         const updateData = req.body;
@@ -336,8 +391,33 @@ async function run() {
         });
       }
     });
+    // Update order payment status after successful payment (protected)
+    app.patch("/orders/:id/payment-status", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { paymentStatus, transactionId } = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              paymentStatus,
+              transactionId,
+              paidAt: new Date(),
+              updatedAt: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating payment status",
+          error: error.message,
+        });
+      }
+    });
+
     // payment related apis
-    app.post("/payment-checkout-session", async (req, res) => {
+    app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
       try {
         const parcelInfo = req.body || {};
         console.log("/payment-checkout-session called with:", parcelInfo);
@@ -375,72 +455,13 @@ async function run() {
           ],
           mode: "payment",
           metadata: {
-            parcelId: parcelInfo.parcelId,
-            trackingId: parcelInfo.trackingId,
+            orderId: parcelInfo.parcelId,
           },
           customer_email: senderEmail,
           success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
         });
-        app.patch("/payment-success", async (req, res) => {
-          const sessionId = req.query.session_id;
-          const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-          // console.log('session retrieve', session)
-          const transactionId = session.payment_intent;
-          const query = { transactionId: transactionId };
-
-          const paymentExist = await paymentCollection.findOne(query);
-          // console.log(paymentExist);
-          if (paymentExist) {
-            return res.send({
-              message: "already exists",
-              transactionId,
-              trackingId: paymentExist.trackingId,
-            });
-          }
-
-          // use the previous tracking id created during the parcel create which was set to the session metadata during session creation
-          const trackingId = session.metadata.trackingId;
-
-          if (session.payment_status === "paid") {
-            const id = session.metadata.parcelId;
-            const query = { _id: new ObjectId(id) };
-            const update = {
-              $set: {
-                paymentStatus: "paid",
-                deliveryStatus: "pending-pickup",
-              },
-            };
-
-            const result = await parcelsCollection.updateOne(query, update);
-
-            const payment = {
-              amount: session.amount_total / 100,
-              currency: session.currency,
-              customerEmail: session.customer_email,
-              parcelId: session.metadata.parcelId,
-              parcelName: session.metadata.parcelName,
-              transactionId: session.payment_intent,
-              paymentStatus: session.payment_status,
-              paidAt: new Date(),
-              trackingId: trackingId,
-            };
-
-            const resultPayment = await paymentCollection.insertOne(payment);
-
-            logTracking(trackingId, "parcel_paid");
-
-            return res.send({
-              success: true,
-              modifyParcel: result,
-              trackingId: trackingId,
-              transactionId: session.payment_intent,
-              paymentInfo: resultPayment,
-            });
-          }
-          return res.send({ success: false });
-        });
         console.log("Stripe session created:", {
           id: session.id,
           url: session.url,
@@ -455,6 +476,80 @@ async function run() {
         });
       }
     });
+
+    // Handle payment success - update order status
+    app.patch("/payment-success", async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+
+        if (!sessionId) {
+          return res.status(400).send({ error: "Missing session_id" });
+        }
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        const transactionId = session.payment_intent;
+
+        // Check if payment already processed
+        const paymentExist = await paymentCollection.findOne({ transactionId });
+        if (paymentExist) {
+          return res.send({
+            success: true,
+            message: "Payment already processed",
+            transactionId,
+            orderId: paymentExist.orderId,
+          });
+        }
+
+        if (session.payment_status === "paid") {
+          const orderId = session.metadata.orderId;
+
+          // Update order payment status
+          const updateResult = await orderCollection.updateOne(
+            { _id: new ObjectId(orderId) },
+            {
+              $set: {
+                paymentStatus: "paid",
+                transactionId: transactionId,
+                paidAt: new Date(),
+                updatedAt: new Date(),
+              },
+            }
+          );
+
+          // Record payment
+          const payment = {
+            orderId: orderId,
+            amount: session.amount_total / 100,
+            currency: session.currency,
+            customerEmail: session.customer_email,
+            transactionId: transactionId,
+            paymentStatus: session.payment_status,
+            paidAt: new Date(),
+          };
+
+          const paymentResult = await paymentCollection.insertOne(payment);
+
+          return res.send({
+            success: true,
+            message: "Payment processed successfully",
+            orderId: orderId,
+            transactionId: transactionId,
+            paymentId: paymentResult.insertedId,
+          });
+        }
+
+        return res
+          .status(400)
+          .send({ success: false, message: "Payment not completed" });
+      } catch (error) {
+        console.error("Error in /payment-success:", error);
+        res.status(500).send({
+          error: "Server error processing payment",
+          detail: error.message,
+        });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
