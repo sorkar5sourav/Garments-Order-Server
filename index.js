@@ -158,12 +158,30 @@ async function run() {
     // Get all products
     app.get("/products", async (req, res) => {
       try {
-        const { createdBy } = req.query;
+        const { createdBy, page = 1, limit = 12 } = req.query;
         const query = {};
         if (createdBy) query.createdBy = createdBy;
 
-        const products = await productCollection.find(query).toArray();
-        res.send(products);
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const skip = (pageNum - 1) * limitNum;
+
+        const totalProducts = await productCollection.countDocuments(query);
+        const products = await productCollection
+          .find(query)
+          .skip(skip)
+          .limit(limitNum)
+          .toArray();
+
+        res.send({
+          products,
+          pagination: {
+            currentPage: pageNum,
+            limit: limitNum,
+            totalProducts,
+            totalPages: Math.ceil(totalProducts / limitNum),
+          },
+        });
       } catch (error) {
         res
           .status(500)
