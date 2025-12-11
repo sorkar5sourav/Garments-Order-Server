@@ -90,6 +90,10 @@ async function run() {
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.role = "user";
+      user.status = "active";
+      user.suspendReason = null;
+      user.suspendFeedback = null;
+      user.suspendedAt = null;
       user.createdAt = new Date();
       const email = user.email;
       const userExists = await userCollection.findOne({ email });
@@ -106,7 +110,12 @@ async function run() {
       const email = req.params.email;
       const query = { email };
       const user = await userCollection.findOne(query);
-      res.send({ role: user?.role || "user" });
+      res.send({
+        role: user?.role || "user",
+        status: user?.status || "active",
+        suspendReason: user?.suspendReason || null,
+        suspendFeedback: user?.suspendFeedback || null,
+      });
     });
 
     // admin - get all users (supports search and filters via query params)
@@ -148,11 +157,21 @@ async function run() {
     app.patch("/users/:id/role", async (req, res) => {
       try {
         const id = req.params.id;
-        const { role, status } = req.body;
+        const { role, status, suspendReason, suspendFeedback, suspendedAt } =
+          req.body;
 
         const updateDoc = { $set: { updatedAt: new Date() } };
         if (role) updateDoc.$set.role = role;
         if (status) updateDoc.$set.status = status;
+        if (typeof suspendReason !== "undefined" || status === "active") {
+          updateDoc.$set.suspendReason = suspendReason || null;
+        }
+        if (typeof suspendFeedback !== "undefined" || status === "active") {
+          updateDoc.$set.suspendFeedback = suspendFeedback || null;
+        }
+        if (typeof suspendedAt !== "undefined" || status === "active") {
+          updateDoc.$set.suspendedAt = suspendedAt || null;
+        }
 
         const result = await userCollection.updateOne(
           { _id: new ObjectId(id) },
@@ -201,10 +220,36 @@ async function run() {
     });
 
     // Post a new product
-    app.post("/products", async (req, res) => {
+    app.post("/products", verifyFBToken, async (req, res) => {
       try {
+        const actorEmail = req.decoded_email;
+        const actor = await userCollection.findOne({ email: actorEmail });
+
+        if (!actor) {
+          return res
+            .status(403)
+            .send({ message: "User not found", code: "NO_USER" });
+        }
+
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({
+            message: "Only managers or admins can add products",
+            code: "FORBIDDEN",
+          });
+        }
+
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message: "Account suspended. Cannot add products.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
+        }
+
         const product = req.body;
         product.createdAt = new Date();
+        product.createdBy = actorEmail;
 
         const result = await productCollection.insertOne(product);
         res.send(result);
@@ -253,6 +298,28 @@ async function run() {
     app.post("/orders", verifyFBToken, async (req, res) => {
       try {
         const orderData = req.body;
+        const requesterEmail = req.decoded_email;
+
+        if (
+          !orderData.email ||
+          orderData.email.toLowerCase() !== requesterEmail.toLowerCase()
+        ) {
+          return res.status(403).send({
+            message: "Cannot place orders for a different account.",
+            code: "FORBIDDEN",
+          });
+        }
+
+        const account = await userCollection.findOne({ email: requesterEmail });
+        if (account?.status === "suspended") {
+          return res.status(403).send({
+            message: "Your account is suspended. New orders are disabled.",
+            code: "SUSPENDED",
+            suspendReason: account.suspendReason,
+            suspendFeedback: account.suspendFeedback,
+          });
+        }
+
         orderData.status = "pending"; // Admin approval status
         orderData.paymentStatus = "unpaid"; // Payment status - user can pay without approval
         orderData.createdAt = new Date();
@@ -376,10 +443,37 @@ async function run() {
     });
 
     // Update order status
-    app.patch("/orders/:id/status", async (req, res) => {
+    app.patch("/orders/:id/status", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
         const { status, approvedAt } = req.body;
+        const actor = await userCollection.findOne({
+          email: req.decoded_email,
+        });
+
+        if (!actor) {
+          return res
+            .status(403)
+            .send({ message: "User not found", code: "NO_USER" });
+        }
+
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({
+            message: "Only managers or admins can update order status",
+            code: "FORBIDDEN",
+          });
+        }
+
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message:
+              "Your account is suspended. Order approval/rejection is disabled.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
+        }
+
         const result = await orderCollection.updateOne(
           { _id: new ObjectId(id) },
           {
@@ -462,7 +556,7 @@ async function run() {
         }
 
         // Convert to smallest currency unit (cents)
-        const amount = Math.round(Number(costValue) * 100);
+        const amount = Math.round(Number(costValue) * 0.82);
         if (isNaN(amount) || amount <= 0) {
           return res.status(400).send({ error: "Invalid cost value" });
         }
