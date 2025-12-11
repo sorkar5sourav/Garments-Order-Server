@@ -47,20 +47,31 @@ const client = new MongoClient(uri, {
   },
 });
 const verifyFBToken = async (req, res, next) => {
-  const token = req.headers.authorization;
+  const authHeader = req.headers.authorization;
 
-  if (!token) {
-    return res.status(401).send({ message: "unauthorized access" });
+  if (!authHeader) {
+    return res.status(401).send({ message: "unauthorized access - no token provided" });
+  }
+
+  // Check if token is in Bearer format
+  if (!authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "unauthorized access - invalid token format" });
   }
 
   try {
-    const idToken = token.split(" ")[1];
+    const idToken = authHeader.split(" ")[1];
+    
+    if (!idToken) {
+      return res.status(401).send({ message: "unauthorized access - token missing" });
+    }
+
     const decoded = await admin.auth().verifyIdToken(idToken);
     console.log("decoded in the token", decoded);
     req.decoded_email = decoded.email;
     next();
   } catch (err) {
-    return res.status(401).send({ message: "unauthorized access" });
+    console.error("Token verification error:", err.message);
+    return res.status(401).send({ message: "unauthorized access - invalid or expired token" });
   }
 };
 async function run() {
