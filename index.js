@@ -1,5 +1,8 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const compression = require("compression");
 const app = express();
 require("dotenv").config();
 const crypto = require("crypto");
@@ -25,16 +28,34 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-function generateTrackingId() {
-  const prefix = "PRCL"; // your brand prefix
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
-  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6-char random hex
 
-  return `${prefix}-${date}-${random}`;
+// Basic security and performance middlewares
+app.use(express.json({ limit: '100kb' }));
+app.use(helmet());
+app.use(compression());
+
+// CORS: restrict origin via env var when available
+const allowedOrigin = process.env.FRONTEND_URL || process.env.SITE_DOMAIN || "http://localhost:5173";
+app.use(
+  cors({
+    origin: allowedOrigin,
+    credentials: true,
+  })
+);
+
+// Rate limiting to mitigate abuse
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: Number(process.env.RATE_LIMIT_MAX) || 100, // limit each IP
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
+
+// If running behind a proxy (like Heroku / Cloudflare), enable trust proxy
+if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1);
 }
-
-app.use(express.json());
-app.use(cors());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jskgf2c.mongodb.net/?appName=Cluster0`;
 
@@ -74,17 +95,24 @@ const verifyFBToken = async (req, res, next) => {
     return res.status(401).send({ message: "unauthorized access - invalid or expired token" });
   }
 };
+// Helper to validate incoming id params before attempting ObjectId conversion
+const isValidObjectId = (id) => {
+  try {
+    return ObjectId.isValid(id);
+  } catch (e) {
+    return false;
+  }
+};
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
+    // Connect the client to the server
     await client.connect();
     const db = client.db("Garments-Order-Production-Tracker-db");
     const userCollection = db.collection("users");
     const productCollection = db.collection("products");
     const orderCollection = db.collection("orders");
     const paymentCollection = db.collection("payments");
-    //         const ridersCollection = db.collection('riders');
-    //         const trackingsCollection = db.collection('trackings')
+ 
 
     // users related apis
     app.post("/users", async (req, res) => {
@@ -118,7 +146,7 @@ async function run() {
       });
     });
 
-    // admin - get all users (supports search and filters via query params)
+    // admin - get all users 
     app.get("/users", async (req, res) => {
       try {
         const { search, role, status } = req.query;
@@ -157,6 +185,9 @@ async function run() {
     app.patch("/users/:id/role", async (req, res) => {
       try {
         const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid user id" });
+        }
         const { role, status, suspendReason, suspendFeedback, suspendedAt } =
           req.body;
 
@@ -260,10 +291,25 @@ async function run() {
       }
     });
 
-    // Update product
-    app.patch("/products/:id", async (req, res) => {
+    // Update product (only manager or admin)
+    app.patch("/products/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid product id" });
+        }
+
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({ message: "Only managers or admins can update products", code: "FORBIDDEN" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Cannot update products.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+
         const updates = req.body || {};
         updates.updatedAt = new Date();
 
@@ -279,10 +325,25 @@ async function run() {
       }
     });
 
-    // Delete product
-    app.delete("/products/:id", async (req, res) => {
+    // Delete product (only manager or admin)
+    app.delete("/products/:id", verifyFBToken, async (req, res) => {
       try {
         const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid product id" });
+        }
+
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({ message: "Only managers or admins can delete products", code: "FORBIDDEN" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Cannot delete products.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+
         const result = await productCollection.deleteOne({
           _id: new ObjectId(id),
         });
@@ -338,208 +399,7 @@ async function run() {
       }
     });
 
-    // Get all orders (protected)
-    app.get("/orders", verifyFBToken, async (req, res) => {
-      try {
-        const { email, status } = req.query;
-        const query = {};
-
-        if (email) {
-          query.email = email;
-        }
-        if (status) {
-          query.status = status;
-        }
-
-        const orders = await orderCollection.find(query).toArray();
-        res.send(orders);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error fetching orders",
-          error: error.message,
-        });
-      }
-    });
-
-    // Get orders by email (protected - legacy endpoint)
-    app.get("/orders/:email", verifyFBToken, async (req, res) => {
-      try {
-        const email = req.params.email;
-        const orders = await orderCollection.find({ email }).toArray();
-        res.send(orders);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error fetching orders",
-          error: error.message,
-        });
-      }
-    });
-
-    // Get order by id
-    app.get("/orders/id/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const order = await orderCollection.findOne({ _id: new ObjectId(id) });
-        res.send(order || {});
-      } catch (error) {
-        res.status(500).send({
-          message: "Error fetching order",
-          error: error.message,
-        });
-      }
-    });
-
-    // Get order by trackingId (protected)
-    app.get("/orders/track/:trackingId", verifyFBToken, async (req, res) => {
-      try {
-        const trackingId = req.params.trackingId;
-        const order = await orderCollection.findOne({ trackingId });
-        res.send(order || {});
-      } catch (error) {
-        res.status(500).send({
-          message: "Error fetching order by trackingId",
-          error: error.message,
-        });
-      }
-    });
-
-    // Delete an order (protected)
-    app.delete("/orders/:id", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const result = await orderCollection.deleteOne({
-          _id: new ObjectId(id),
-        });
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error deleting order",
-          error: error.message,
-        });
-      }
-    });
-
-    // Generic update order endpoint (protected)
-    app.patch("/orders/:id", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const updateData = req.body;
-        const result = await orderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              ...updateData,
-              updatedAt: new Date(),
-            },
-          }
-        );
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error updating order",
-          error: error.message,
-        });
-      }
-    });
-
-    // Update order status
-    app.patch("/orders/:id/status", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const { status, approvedAt } = req.body;
-        const actor = await userCollection.findOne({
-          email: req.decoded_email,
-        });
-
-        if (!actor) {
-          return res
-            .status(403)
-            .send({ message: "User not found", code: "NO_USER" });
-        }
-
-        if (!["manager", "admin"].includes(actor.role)) {
-          return res.status(403).send({
-            message: "Only managers or admins can update order status",
-            code: "FORBIDDEN",
-          });
-        }
-
-        if (actor.status === "suspended") {
-          return res.status(403).send({
-            message:
-              "Your account is suspended. Order approval/rejection is disabled.",
-            code: "SUSPENDED",
-            suspendReason: actor.suspendReason,
-            suspendFeedback: actor.suspendFeedback,
-          });
-        }
-
-        const result = await orderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              status,
-              updatedAt: new Date(),
-              ...(approvedAt ? { approvedAt: new Date(approvedAt) } : {}),
-            },
-          }
-        );
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error updating order status",
-          error: error.message,
-        });
-      }
-    });
-
-    // Append tracking update to order
-    app.patch("/orders/:id/tracking", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const update = req.body || {};
-        const docUpdate = {
-          $push: { trackingUpdates: update },
-          $set: { updatedAt: new Date() },
-        };
-        const result = await orderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          docUpdate
-        );
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error adding tracking update",
-          error: error.message,
-        });
-      }
-    });
-    // Update order payment status after successful payment (protected)
-    app.patch("/orders/:id/payment-status", verifyFBToken, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const { paymentStatus, transactionId } = req.body;
-        const result = await orderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              paymentStatus,
-              transactionId,
-              paidAt: new Date(),
-              updatedAt: new Date(),
-            },
-          }
-        );
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error updating payment status",
-          error: error.message,
-        });
-      }
-    });
-
-    // payment related apis
+   // payment related apis
     app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
       try {
         const parcelInfo = req.body || {};
@@ -599,6 +459,34 @@ async function run() {
         });
       }
     });
+
+    // Update order payment status after successful payment (protected)
+    app.patch("/orders/:id/payment-status", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+        const { paymentStatus, transactionId } = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              paymentStatus,
+              transactionId,
+              paidAt: new Date(),
+              updatedAt: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating payment status",
+          error: error.message,
+        });
+      }
+    });    
 
     // Handle payment success - update order status
     app.patch("/payment-success", async (req, res) => {
@@ -672,6 +560,226 @@ async function run() {
         });
       }
     });
+    
+    // Get orders by email (protected - legacy endpoint)
+    // Allow if requester is manager/admin or the email matches the requester
+    app.get("/orders/:email", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Cannot view orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+        if (!(["manager", "admin"].includes(actor.role) || email.toLowerCase() === req.decoded_email.toLowerCase())) {
+          return res.status(403).send({ message: "You can only view your own orders", code: "FORBIDDEN" });
+        }
+        const orders = await orderCollection.find({ email }).toArray();
+        res.send(orders);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching orders",
+          error: error.message,
+        });
+      }
+    });
+
+    // Get order by id
+    app.get("/orders/id/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+        const order = await orderCollection.findOne({ _id: new ObjectId(id) });
+        res.send(order || {});
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching order",
+          error: error.message,
+        });
+      }
+    });
+
+    // Delete an order (protected)
+    app.delete("/orders/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+        const result = await orderCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error deleting order",
+          error: error.message,
+        });
+      }
+    });
+
+    // Get orders (protected)
+    // - Managers/Admins: can view all orders (with optional filters)
+    // - Regular users: can only view their own orders by passing ?email=<their email>
+    app.get("/orders", verifyFBToken, async (req, res) => {
+      try {
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Cannot view orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+
+        const { email, status } = req.query;
+        const query = {};
+
+        // If requester is manager/admin, allow arbitrary filters
+        if (["manager", "admin"].includes(actor.role)) {
+          if (email) query.email = email;
+          if (status) query.status = status;
+        } else {
+          // Regular user: only allow fetching their own orders
+          if (!email) {
+            return res.status(403).send({ message: "Regular users must provide their email to view orders", code: "FORBIDDEN" });
+          }
+          // Case-insensitive match
+          if (email.toLowerCase() !== req.decoded_email.toLowerCase()) {
+            return res.status(403).send({ message: "You can only view your own orders", code: "FORBIDDEN" });
+          }
+          query.email = req.decoded_email;
+          if (status) query.status = status;
+        }
+
+        const orders = await orderCollection.find(query).toArray();
+        res.send(orders);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching orders",
+          error: error.message,
+        });
+      }
+    });
+    // Generic update order endpoint (protected) - only manager or admin
+    app.patch("/orders/:id", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({ message: "Only managers or admins can update orders", code: "FORBIDDEN" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Cannot update orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+
+        const updateData = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              ...updateData,
+              updatedAt: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating order",
+          error: error.message,
+        });
+      }
+    });
+
+    // Update order status
+    app.patch("/orders/:id/status", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+        const { status, approvedAt } = req.body;
+        const actor = await userCollection.findOne({
+          email: req.decoded_email,
+        });
+
+        if (!actor) {
+          return res
+            .status(403)
+            .send({ message: "User not found", code: "NO_USER" });
+        }
+
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({
+            message: "Only managers or admins can update order status",
+            code: "FORBIDDEN",
+          });
+        }
+
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message:
+              "Your account is suspended. Order approval/rejection is disabled.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
+        }
+
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status,
+              updatedAt: new Date(),
+              ...(approvedAt ? { approvedAt: new Date(approvedAt) } : {}),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating order status",
+          error: error.message,
+        });
+      }
+    });
+
+    // Append tracking update to order
+    app.patch("/orders/:id/tracking", async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+        const update = req.body || {};
+        const docUpdate = {
+          $push: { trackingUpdates: update },
+          $set: { updatedAt: new Date() },
+        };
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          docUpdate
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error adding tracking update",
+          error: error.message,
+        });
+      }
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
@@ -693,4 +801,11 @@ app.get("/", (req, res) => {
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
+});
+
+// Centralized error handler (last middleware)
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err);
+  if (res.headersSent) return next(err);
+  res.status(500).send({ message: "Internal server error" });
 });
