@@ -21,7 +21,7 @@ try {
   serviceAccount = JSON.parse(decoded);
 } catch (err) {
   // Fallback to local file if env var not available
-  serviceAccount = require("./garments-order-tracker-firebase-adminsdk-fbsvc-7dec8bc60d.json");
+  // serviceAccount = require("./garments-order-tracker-firebase-adminsdk-fbsvc-7dec8bc60d.json");
 }
 
 admin.initializeApp({
@@ -87,11 +87,11 @@ const verifyFBToken = async (req, res, next) => {
     }
 
     const decoded = await admin.auth().verifyIdToken(idToken);
-    console.log("decoded in the token", decoded);
+    // console.log("decoded in the token", decoded);
     req.decoded_email = decoded.email;
     next();
   } catch (err) {
-    console.error("Token verification error:", err.message);
+    // console.error("Token verification error:", err.message);
     return res.status(401).send({ message: "unauthorized access - invalid or expired token" });
   }
 };
@@ -403,7 +403,7 @@ async function run() {
     app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
       try {
         const parcelInfo = req.body || {};
-        console.log("/payment-checkout-session called with:", parcelInfo);
+        // console.log("/payment-checkout-session called with:", parcelInfo);
 
         // Validate required fields
         const costValue =
@@ -445,13 +445,13 @@ async function run() {
           cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
         });
 
-        console.log("Stripe session created:", {
-          id: session.id,
-          url: session.url,
-        });
+        // console.log("Stripe session created:", {
+        //   id: session.id,
+        //   url: session.url,
+        // });
         res.send({ url: session.url, id: session.id });
       } catch (err) {
-        console.error("Error in /payment-checkout-session:", err);
+        // console.error("Error in /payment-checkout-session:", err);
         // Return safe error to client
         res.status(500).send({
           error: "Server error creating checkout session",
@@ -553,7 +553,7 @@ async function run() {
           .status(400)
           .send({ success: false, message: "Payment not completed" });
       } catch (error) {
-        console.error("Error in /payment-success:", error);
+        // console.error("Error in /payment-success:", error);
         res.status(500).send({
           error: "Server error processing payment",
           detail: error.message,
@@ -756,38 +756,13 @@ async function run() {
       }
     });
 
-    // Append tracking update to order
-    app.patch("/orders/:id/tracking", async (req, res) => {
-      try {
-        const id = req.params.id;
-        if (!isValidObjectId(id)) {
-          return res.status(400).send({ message: "Invalid order id" });
-        }
-        const update = req.body || {};
-        const docUpdate = {
-          $push: { trackingUpdates: update },
-          $set: { updatedAt: new Date() },
-        };
-        const result = await orderCollection.updateOne(
-          { _id: new ObjectId(id) },
-          docUpdate
-        );
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({
-          message: "Error adding tracking update",
-          error: error.message,
-        });
-      }
-    });
-
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } catch (error) {
-    console.error("MongoDB Connection Error:", error);
+    e.error("MongoDB Connection Error:", error);
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -800,12 +775,12 @@ app.get("/", (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
+  // console.log(`Example app listening on port ${port}`);
 });
 
 // Centralized error handler (last middleware)
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
+  // console.error("Unhandled error:", err);
   if (res.headersSent) return next(err);
   res.status(500).send({ message: "Internal server error" });
 });
