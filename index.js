@@ -230,6 +230,7 @@ async function run() {
         const totalProducts = await productCollection.countDocuments(query);
         const products = await productCollection
           .find(query)
+          .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limitNum)
           .toArray();
@@ -770,13 +771,18 @@ async function run() {
 }
 run().catch(console.dir);
 
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
+}
+
 app.get("/", (req, res) => {
   res.send("Server is running just fine!");
 });
 
-app.listen(port, () => {
-  // console.log(`Example app listening on port ${port}`);
-});
+// Export the app for Vercel serverless deployment
+module.exports = app;
 
 // Centralized error handler (last middleware)
 app.use((err, req, res, next) => {
