@@ -112,7 +112,7 @@ async function run() {
     const productCollection = db.collection("products");
     const orderCollection = db.collection("orders");
     const paymentCollection = db.collection("payments");
- 
+    const reviewCollection = db.collection("reviews");
 
     // users related apis
     app.post("/users", async (req, res) => {
@@ -752,6 +752,85 @@ async function run() {
       } catch (error) {
         res.status(500).send({
           message: "Error updating order status",
+          error: error.message,
+        });
+      }
+    });
+
+    // Reviews related APIs
+    app.post("/reviews", async (req, res) => {
+      try {
+        const review = req.body;
+        review.createdAt = new Date();
+        review.status = "pending"; // Admin approval for display
+
+        const result = await reviewCollection.insertOne(review);
+        res.status(201).send({
+          message: "Review submitted successfully",
+          reviewId: result.insertedId,
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: "Error submitting review",
+          error: error.message,
+        });
+      }
+    });
+
+    app.get("/reviews", async (req, res) => {
+      try {
+        const { status = "approved" } = req.query;
+        const query = {};
+        if (status !== "all") {
+          query.status = status;
+        }
+
+        const reviews = await reviewCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .limit(15)
+          .toArray();
+
+        res.send({ reviews });
+      } catch (error) {
+        res.status(500).send({
+          message: "Error fetching reviews",
+          error: error.message,
+        });
+      }
+    });
+
+    // Admin - update review status
+    app.patch("/reviews/:id/status", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid review id" });
+        }
+
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({ message: "Only managers or admins can update review status", code: "FORBIDDEN" });
+        }
+
+        const { status } = req.body;
+        const result = await reviewCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status,
+              updatedAt: new Date(),
+            },
+          }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({
+          message: "Error updating review status",
           error: error.message,
         });
       }
