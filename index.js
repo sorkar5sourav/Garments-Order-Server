@@ -117,8 +117,9 @@ async function run() {
     // users related apis
     app.post("/users", async (req, res) => {
       const user = req.body;
-      user.role = "user";
-      user.status = "active";
+      // Set defaults if not provided
+      user.role = user.role || "buyer";
+      user.status = user.status || "pending";
       user.suspendReason = null;
       user.suspendFeedback = null;
       user.suspendedAt = null;
@@ -219,9 +220,19 @@ async function run() {
     // Get all products
     app.get("/products", async (req, res) => {
       try {
-        const { createdBy, page = 1, limit = 12 } = req.query;
+        const { createdBy, page = 1, limit = 12, search = "" } = req.query;
         const query = {};
         if (createdBy) query.createdBy = createdBy;
+
+        // Add search functionality
+        if (search) {
+          query.$or = [
+            { name: { $regex: search, $options: "i" } },
+            { description: { $regex: search, $options: "i" } },
+            { category: { $regex: search, $options: "i" } },
+            { brand: { $regex: search, $options: "i" } }
+          ];
+        }
 
         const pageNum = parseInt(page);
         const limitNum = parseInt(limit);
@@ -261,6 +272,13 @@ async function run() {
           return res
             .status(403)
             .send({ message: "User not found", code: "NO_USER" });
+        }
+
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Please wait for activation.",
+            code: "PENDING",
+          });
         }
 
         if (!["manager", "admin"].includes(actor.role)) {
@@ -304,6 +322,12 @@ async function run() {
         if (!actor) {
           return res.status(403).send({ message: "User not found", code: "NO_USER" });
         }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Please wait for activation.",
+            code: "PENDING",
+          });
+        }
         if (!["manager", "admin"].includes(actor.role)) {
           return res.status(403).send({ message: "Only managers or admins can update products", code: "FORBIDDEN" });
         }
@@ -337,6 +361,12 @@ async function run() {
         const actor = await userCollection.findOne({ email: req.decoded_email });
         if (!actor) {
           return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Please wait for activation.",
+            code: "PENDING",
+          });
         }
         if (!["manager", "admin"].includes(actor.role)) {
           return res.status(403).send({ message: "Only managers or admins can delete products", code: "FORBIDDEN" });
@@ -373,6 +403,12 @@ async function run() {
         }
 
         const account = await userCollection.findOne({ email: requesterEmail });
+        if (account?.status !== "active") {
+          return res.status(401).send({
+            message: "Account pending approval. Orders are disabled until activation.",
+            code: "PENDING",
+          });
+        }
         if (account?.status === "suspended") {
           return res.status(403).send({
             message: "Your account is suspended. New orders are disabled.",
@@ -422,6 +458,25 @@ async function run() {
           return res.status(400).send({ error: "Invalid cost value" });
         }
 
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message: "Your account is suspended. Payments are disabled.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Payments are disabled until activation.",
+            code: "PENDING",
+          });
+        }
+
         const session = await stripe.checkout.sessions.create({
           line_items: [
             {
@@ -467,6 +522,24 @@ async function run() {
         const id = req.params.id;
         if (!isValidObjectId(id)) {
           return res.status(400).send({ message: "Invalid order id" });
+        }
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Payment updates are disabled.",
+            code: "PENDING",
+          });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message: "Account suspended. Payment updates are disabled.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
         }
         const { paymentStatus, transactionId } = req.body;
         const result = await orderCollection.updateOne(
@@ -571,6 +644,12 @@ async function run() {
         if (!actor) {
           return res.status(403).send({ message: "User not found", code: "NO_USER" });
         }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Access is restricted until activation.",
+            code: "PENDING",
+          });
+        }
         if (actor.status === "suspended") {
           return res.status(403).send({ message: "Account suspended. Cannot view orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
         }
@@ -611,6 +690,24 @@ async function run() {
         if (!isValidObjectId(id)) {
           return res.status(400).send({ message: "Invalid order id" });
         }
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Order deletion is disabled.",
+            code: "PENDING",
+          });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({
+            message: "Account suspended. Order deletion is disabled.",
+            code: "SUSPENDED",
+            suspendReason: actor.suspendReason,
+            suspendFeedback: actor.suspendFeedback,
+          });
+        }
         const result = await orderCollection.deleteOne({
           _id: new ObjectId(id),
         });
@@ -631,6 +728,12 @@ async function run() {
         const actor = await userCollection.findOne({ email: req.decoded_email });
         if (!actor) {
           return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Access is restricted until activation.",
+            code: "PENDING",
+          });
         }
         if (actor.status === "suspended") {
           return res.status(403).send({ message: "Account suspended. Cannot view orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
@@ -680,6 +783,12 @@ async function run() {
         if (!["manager", "admin"].includes(actor.role)) {
           return res.status(403).send({ message: "Only managers or admins can update orders", code: "FORBIDDEN" });
         }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Order updates are disabled.",
+            code: "PENDING",
+          });
+        }
         if (actor.status === "suspended") {
           return res.status(403).send({ message: "Account suspended. Cannot update orders.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
         }
@@ -725,6 +834,14 @@ async function run() {
           return res.status(403).send({
             message: "Only managers or admins can update order status",
             code: "FORBIDDEN",
+          });
+        }
+
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message:
+              "Account pending approval. Order approval/rejection is disabled until activation.",
+            code: "PENDING",
           });
         }
 
@@ -815,6 +932,12 @@ async function run() {
         }
         if (!["manager", "admin"].includes(actor.role)) {
           return res.status(403).send({ message: "Only managers or admins can update review status", code: "FORBIDDEN" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({
+            message: "Account pending approval. Review moderation is disabled.",
+            code: "PENDING",
+          });
         }
 
         const { status } = req.body;
