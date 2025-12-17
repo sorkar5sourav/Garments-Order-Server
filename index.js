@@ -43,19 +43,35 @@ app.use(
   })
 );
 
-// Rate limiting to mitigate abuse
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: Number(process.env.RATE_LIMIT_MAX) || 100, // limit each IP
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use(limiter);
-
 // If running behind a proxy (like Heroku / Cloudflare), enable trust proxy
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
   app.set("trust proxy", 1);
 }
+
+// Rate limiting to mitigate abuse
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // default 15 minutes
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX) || (process.env.NODE_ENV === 'production' ? 100 : 2000);
+// Optional comma-separated list of IPs to whitelist from rate limiting
+const RATE_LIMIT_WHITELIST = (process.env.RATE_LIMIT_WHITELIST || '').split(',').map(s => s.trim()).filter(Boolean);
+
+const limiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Skip limiting for trusted IPs or important endpoints (adjust the paths as needed)
+  skip: (req) => {
+    if (RATE_LIMIT_WHITELIST.includes(req.ip)) return true;
+    const safePaths = ['/payment-success', '/payment-checkout-session', '/'];
+    if (safePaths.some(p => req.path.startsWith(p))) return true;
+    return false;
+  },
+  handler: (req, res) => {
+    res.status(429).json({ message: 'Too many requests - try again later' });
+  },
+});
+
+app.use(limiter);
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jskgf2c.mongodb.net/?appName=Cluster0`;
 
@@ -114,9 +130,30 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const reviewCollection = db.collection("reviews");
 
+    // Ensure a unique index on email to prevent duplicates at the DB level
+    try {
+      await userCollection.createIndex(
+        { email: 1 },
+        {
+          unique: true,
+          partialFilterExpression: { email: { $exists: true } },
+        }
+      );
+    } catch (idxErr) {
+      // Ignore index creation errors in case the index already exists or on restricted environments
+      // console.warn('Index creation warning:', idxErr.message);
+    }
+
     // users related apis
     app.post("/users", async (req, res) => {
       const user = req.body;
+      if (!user || !user.email) {
+        return res.status(400).send({ message: "Email is required" });
+      }
+
+      // Normalize email to avoid case-variants creating duplicates
+      user.email = String(user.email).toLowerCase();
+
       // Set defaults if not provided
       user.role = user.role || "buyer";
       user.status = user.status || "pending";
@@ -124,15 +161,29 @@ async function run() {
       user.suspendFeedback = null;
       user.suspendedAt = null;
       user.createdAt = new Date();
-      const email = user.email;
-      const userExists = await userCollection.findOne({ email });
 
-      if (userExists) {
-        return res.send({ message: "user exists" });
+      try {
+        // Use upsert to make creation idempotent and avoid race-condition duplicates
+        const result = await userCollection.updateOne(
+          { email: user.email },
+          { $setOnInsert: user },
+          { upsert: true }
+        );
+
+        // If a new document was inserted, upsertedCount will be 1
+        if (result.upsertedCount && result.upsertedCount > 0) {
+          return res.status(201).send({ message: "user created", userId: result.upsertedId ? result.upsertedId._id : null });
+        }
+
+        // Otherwise the user already existed
+        return res.status(200).send({ message: "user exists" });
+      } catch (err) {
+        // Handle duplicate key errors just in case
+        if (err && err.code === 11000) {
+          return res.status(409).send({ message: "user exists" });
+        }
+        res.status(500).send({ message: "Error creating user", error: err.message });
       }
-
-      const result = await userCollection.insertOne(user);
-      res.send(result);
     });
 
     app.get("/users/:email/role", async (req, res) => {
@@ -422,6 +473,47 @@ async function run() {
         orderData.paymentStatus = "unpaid"; // Payment status - user can pay without approval
         orderData.createdAt = new Date();
 
+        // If a productId and quantity are provided, attempt to decrement the product stock atomically
+        const productId = orderData.productId;
+        const qty = Math.max(0, Number(orderData.quantity) || 0);
+
+        if (productId && isValidObjectId(productId) && qty > 0) {
+          // Try to decrement availableQuantity only if enough stock exists
+          const decResult = await productCollection.updateOne(
+            { _id: new ObjectId(productId), availableQuantity: { $gte: qty } },
+            { $inc: { availableQuantity: -qty, sold: qty } }
+          );
+
+          if (!decResult.modifiedCount || decResult.modifiedCount === 0) {
+            return res.status(400).send({
+              message: "Insufficient product quantity",
+              code: "OUT_OF_STOCK",
+            });
+          }
+
+          // Now insert the order; if insertion fails, try to roll back the product decrement
+          try {
+            const result = await orderCollection.insertOne(orderData);
+            return res.status(201).send({
+              message: "Order placed successfully",
+              orderId: result.insertedId,
+              result,
+            });
+          } catch (insertErr) {
+            // Attempt rollback
+            try {
+              await productCollection.updateOne(
+                { _id: new ObjectId(productId) },
+                { $inc: { availableQuantity: qty, sold: -qty } }
+              );
+            } catch (rbErr) {
+              // If rollback fails, log a warning (can't console.log here in production)
+            }
+            throw insertErr;
+          }
+        }
+
+        // If no productId/quantity provided, just insert the order
         const result = await orderCollection.insertOne(orderData);
         res.status(201).send({
           message: "Order placed successfully",
@@ -871,6 +963,54 @@ async function run() {
           message: "Error updating order status",
           error: error.message,
         });
+      }
+    });
+
+    // Add tracking update to an order (protected) - only manager or admin
+    app.patch("/orders/:id/tracking", verifyFBToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        if (!isValidObjectId(id)) {
+          return res.status(400).send({ message: "Invalid order id" });
+        }
+
+        const actor = await userCollection.findOne({ email: req.decoded_email });
+        if (!actor) {
+          return res.status(403).send({ message: "User not found", code: "NO_USER" });
+        }
+        if (!["manager", "admin"].includes(actor.role)) {
+          return res.status(403).send({ message: "Only managers or admins can add tracking", code: "FORBIDDEN" });
+        }
+        if (actor.status !== "active" && actor.role !== "admin") {
+          return res.status(401).send({ message: "Account pending approval. Tracking updates are disabled.", code: "PENDING" });
+        }
+        if (actor.status === "suspended") {
+          return res.status(403).send({ message: "Account suspended. Tracking updates are disabled.", code: "SUSPENDED", suspendReason: actor.suspendReason, suspendFeedback: actor.suspendFeedback });
+        }
+
+        const update = req.body || {};
+        // Normalize tracking object
+        const trackingEntry = {
+          status: update.status || "",
+          location: update.location || "",
+          note: update.note || "",
+          time: update.time ? new Date(update.time).toISOString() : new Date().toISOString(),
+          createdBy: req.decoded_email,
+        };
+
+        const result = await orderCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $push: { trackingUpdates: trackingEntry }, $set: { updatedAt: new Date() } },
+          { returnDocument: "after" }
+        );
+
+        if (!result.value) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+
+        res.send({ message: "Tracking update added", order: result.value });
+      } catch (error) {
+        res.status(500).send({ message: "Error adding tracking update", error: error.message });
       }
     });
 
