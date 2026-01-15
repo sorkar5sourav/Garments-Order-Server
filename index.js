@@ -144,6 +144,8 @@ async function run() {
       const orderCollection = db.collection("orders");
       const paymentCollection = db.collection("payments");
       const reviewCollection = db.collection("reviews");
+      const faqCollection = db.collection("faqs");
+      const blogCollection = db.collection("blogs");
 
       // --- Reusable helpers to reduce repeated code ---
       const sendNoUser = (res) =>
@@ -358,9 +360,26 @@ async function run() {
       // Get all products
       app.get("/products", async (req, res) => {
         try {
-          const { createdBy, page = 1, limit = 12, search = "" } = req.query;
+          const {
+            createdBy,
+            page = 1,
+            limit = 12,
+            search = "",
+            category,
+            minPrice,
+            maxPrice,
+            sortBy,
+            order,
+          } = req.query;
           const query = {};
           if (createdBy) query.createdBy = createdBy;
+          if (category) query.category = category;
+          const priceFilter = {};
+          if (minPrice) priceFilter.$gte = Number(minPrice);
+          if (maxPrice) priceFilter.$lte = Number(maxPrice);
+          if (Object.keys(priceFilter).length) {
+            query.price = priceFilter;
+          }
 
           // Add search functionality
           if (search) {
@@ -377,9 +396,21 @@ async function run() {
           const skip = (pageNum - 1) * limitNum;
 
           const totalProducts = await productCollection.countDocuments(query);
+
+          // Sorting
+          const sort = {};
+          if (sortBy) {
+            const direction = order === "asc" ? 1 : -1;
+            if (["createdAt", "price", "availableQuantity"].includes(sortBy)) {
+              sort[sortBy] = direction;
+            }
+          } else {
+            sort.createdAt = -1;
+          }
+
           const products = await productCollection
             .find(query)
-            .sort({ createdAt: -1 })
+            .sort(sort)
             .skip(skip)
             .limit(limitNum)
             .toArray();
@@ -397,6 +428,38 @@ async function run() {
           res
             .status(500)
             .send({ message: "Error fetching products", error: error.message });
+        }
+      });
+
+      // Product categories summary for homepage
+      app.get("/products/categories-summary", async (req, res) => {
+        try {
+          const pipeline = [
+            {
+              $group: {
+                _id: "$category",
+                totalProducts: { $sum: 1 },
+                totalAvailable: { $sum: "$availableQuantity" },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                category: "$_id",
+                totalProducts: 1,
+                totalAvailable: 1,
+              },
+            },
+            { $sort: { totalProducts: -1 } },
+          ];
+
+          const categories = await productCollection.aggregate(pipeline).toArray();
+          res.send({ categories });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching category summary",
+            error: error.message,
+          });
         }
       });
 
@@ -1061,6 +1124,66 @@ async function run() {
         } catch (error) {
           res.status(500).send({
             message: "Error updating review status",
+            error: error.message,
+          });
+        }
+      });
+
+      // FAQs (public)
+      app.get("/faqs", async (req, res) => {
+        try {
+          const faqs = await faqCollection
+            .find({ isActive: { $ne: false } })
+            .sort({ order: 1, createdAt: -1 })
+            .toArray();
+          res.send({ faqs });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error fetching FAQs", error: error.message });
+        }
+      });
+
+      // Blog posts (public, homepage highlights)
+      app.get("/blogs", async (req, res) => {
+        try {
+          const { limit = 3 } = req.query;
+          const limitNum = parseInt(limit);
+          const blogs = await blogCollection
+            .find({ isPublished: { $ne: false } })
+            .sort({ publishedAt: -1, createdAt: -1 })
+            .limit(limitNum)
+            .toArray();
+          res.send({ blogs });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error fetching blogs", error: error.message });
+        }
+      });
+
+      // High-level stats for homepage and dashboards
+      app.get("/home-stats", async (req, res) => {
+        try {
+          const [usersCount, productsCount, ordersCount, reviewsCount, completedOrders] =
+            await Promise.all([
+              userCollection.countDocuments(),
+              productCollection.countDocuments(),
+              orderCollection.countDocuments(),
+              reviewCollection.countDocuments({ status: "approved" }),
+              orderCollection.countDocuments({ status: "delivered" }),
+            ]);
+
+          res.send({
+            usersCount,
+            productsCount,
+            ordersCount,
+            reviewsCount,
+            completedOrders,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching stats",
             error: error.message,
           });
         }

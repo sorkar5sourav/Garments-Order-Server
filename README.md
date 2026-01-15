@@ -19,7 +19,7 @@ This server provides RESTful APIs to handle:
 - **Database**: MongoDB (with MongoDB Driver)
 - **Authentication**: Firebase Admin SDK for token verification
 - **Payments**: Stripe API
-- **Security**: Helmet, CORS, Rate Limiting, Compression
+- **Security**: CORS, Rate Limiting, Compression
 - **Deployment**: Vercel (or compatible Node.js hosting)
 
 ## Features
