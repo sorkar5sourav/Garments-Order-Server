@@ -25,19 +25,23 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
+// Enhanced CORS configuration for specific domains
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://garments-order-tracker.web.app",
+      "https://garments-order-tracker.firebaseapp.com",
+    ],
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+app.use(compression());
 // Basic security and performance middlewares
 app.use(express.json());
 app.use(helmet());
-
-// Enhanced CORS configuration for specific domains
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost:3000").split(",");
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
-app.use(compression());
 
 // If running behind a proxy (like Heroku / Cloudflare), enable trust proxy
 if (process.env.TRUST_PROXY === "1" || process.env.NODE_ENV === "production") {
@@ -354,7 +358,9 @@ async function run() {
           updates.updatedAt = new Date();
 
           if (Object.keys(updates).length === 0) {
-            return res.status(400).send({ message: "No valid fields to update" });
+            return res
+              .status(400)
+              .send({ message: "No valid fields to update" });
           }
 
           const result = await userCollection.updateOne(
@@ -521,7 +527,9 @@ async function run() {
             { $sort: { totalProducts: -1 } },
           ];
 
-          const categories = await productCollection.aggregate(pipeline).toArray();
+          const categories = await productCollection
+            .aggregate(pipeline)
+            .toArray();
           res.send({ categories });
         } catch (error) {
           res.status(500).send({
@@ -1320,7 +1328,10 @@ async function run() {
           };
 
           const result = await faqCollection.insertOne(faq);
-          res.send({ message: "FAQ posted successfully", faqId: result.insertedId });
+          res.send({
+            message: "FAQ posted successfully",
+            faqId: result.insertedId,
+          });
         } catch (error) {
           res
             .status(500)
@@ -1333,7 +1344,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can update FAQs"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can update FAQs")
+          )
             return;
 
           const { id } = req.params;
@@ -1364,7 +1377,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can delete FAQs"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can delete FAQs")
+          )
             return;
 
           const { id } = req.params;
@@ -1391,7 +1406,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can post blogs"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can post blogs")
+          )
             return;
 
           const {
@@ -1424,7 +1441,10 @@ async function run() {
           };
 
           const result = await blogCollection.insertOne(blog);
-          res.send({ message: "Blog posted successfully", blogId: result.insertedId });
+          res.send({
+            message: "Blog posted successfully",
+            blogId: result.insertedId,
+          });
         } catch (error) {
           res
             .status(500)
@@ -1437,7 +1457,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can update blogs"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can update blogs")
+          )
             return;
 
           const { id } = req.params;
@@ -1473,7 +1495,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can delete blogs"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can delete blogs")
+          )
             return;
 
           const { id } = req.params;
@@ -1498,14 +1522,19 @@ async function run() {
       // High-level stats for homepage and dashboards
       app.get("/home-stats", async (req, res) => {
         try {
-          const [usersCount, productsCount, ordersCount, reviewsCount, completedOrders] =
-            await Promise.all([
-              userCollection.countDocuments(),
-              productCollection.countDocuments(),
-              orderCollection.countDocuments(),
-              reviewCollection.countDocuments({ status: "approved" }),
-              orderCollection.countDocuments({ status: "delivered" }),
-            ]);
+          const [
+            usersCount,
+            productsCount,
+            ordersCount,
+            reviewsCount,
+            completedOrders,
+          ] = await Promise.all([
+            userCollection.countDocuments(),
+            productCollection.countDocuments(),
+            orderCollection.countDocuments(),
+            reviewCollection.countDocuments({ status: "approved" }),
+            orderCollection.countDocuments({ status: "delivered" }),
+          ]);
 
           res.send({
             usersCount,
@@ -1527,7 +1556,9 @@ async function run() {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["admin"], "Only admins can access this"))
+          if (
+            !requireRoles(actor, res, ["admin"], "Only admins can access this")
+          )
             return;
 
           const { period = "7days" } = req.query;
@@ -1535,7 +1566,11 @@ async function run() {
           let startDate = new Date();
 
           if (period === "today") {
-            startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            startDate = new Date(
+              now.getFullYear(),
+              now.getMonth(),
+              now.getDate()
+            );
           } else if (period === "7days") {
             startDate = new Date();
             startDate.setDate(startDate.getDate() - 6);
@@ -1640,122 +1675,135 @@ async function run() {
       });
 
       // Manager Dashboard Overview
-      app.get("/dashboard/manager/overview", verifyFBToken, async (req, res) => {
-        try {
-          const actor = await requireActor(req, res);
-          if (!actor) return;
-          if (!requireRoles(actor, res, ["manager"], "Only managers can access this"))
-            return;
+      app.get(
+        "/dashboard/manager/overview",
+        verifyFBToken,
+        async (req, res) => {
+          try {
+            const actor = await requireActor(req, res);
+            if (!actor) return;
+            if (
+              !requireRoles(
+                actor,
+                res,
+                ["manager"],
+                "Only managers can access this"
+              )
+            )
+              return;
 
-          // Get manager's products
-          const managerProducts = await productCollection
-            .find({ createdBy: actor.email })
-            .toArray();
+            // Get manager's products
+            const managerProducts = await productCollection
+              .find({ createdBy: actor.email })
+              .toArray();
 
-          // Get orders for manager's products
-          const productIds = managerProducts.map((p) => p._id.toString());
-          const allOrders = await orderCollection.find({}).toArray();
-          const managerOrders = allOrders.filter((order) =>
-            productIds.includes(order.productId)
-          );
+            // Get orders for manager's products
+            const productIds = managerProducts.map((p) => p._id.toString());
+            const allOrders = await orderCollection.find({}).toArray();
+            const managerOrders = allOrders.filter((order) =>
+              productIds.includes(order.productId)
+            );
 
-          // Calculate stats
-          const pendingOrders = managerOrders.filter(
-            (o) => o.status === "pending"
-          ).length;
-          const approvedOrders = managerOrders.filter(
-            (o) => o.status === "approved" || o.status === "processing"
-          ).length;
-          const lowStockItems = managerProducts.filter(
-            (p) => p.availableQuantity < 10
-          ).length;
-
-          // Weekly approvals (last 4 weeks)
-          const weeklyApprovals = [];
-          for (let week = 3; week >= 0; week--) {
-            const weekStart = new Date();
-            weekStart.setDate(weekStart.getDate() - week * 7);
-            weekStart.setHours(0, 0, 0, 0);
-            const weekEnd = new Date(weekStart);
-            weekEnd.setDate(weekEnd.getDate() + 6);
-            weekEnd.setHours(23, 59, 59, 999);
-
-            const approvals = managerOrders.filter(
-              (o) =>
-                o.status === "approved" &&
-                o.createdAt &&
-                new Date(o.createdAt) >= weekStart &&
-                new Date(o.createdAt) <= weekEnd
+            // Calculate stats
+            const pendingOrders = managerOrders.filter(
+              (o) => o.status === "pending"
+            ).length;
+            const approvedOrders = managerOrders.filter(
+              (o) => o.status === "approved" || o.status === "processing"
+            ).length;
+            const lowStockItems = managerProducts.filter(
+              (p) => p.availableQuantity < 10
             ).length;
 
-            weeklyApprovals.push({
-              name: `Week ${4 - week}`,
-              approvals,
+            // Weekly approvals (last 4 weeks)
+            const weeklyApprovals = [];
+            for (let week = 3; week >= 0; week--) {
+              const weekStart = new Date();
+              weekStart.setDate(weekStart.getDate() - week * 7);
+              weekStart.setHours(0, 0, 0, 0);
+              const weekEnd = new Date(weekStart);
+              weekEnd.setDate(weekEnd.getDate() + 6);
+              weekEnd.setHours(23, 59, 59, 999);
+
+              const approvals = managerOrders.filter(
+                (o) =>
+                  o.status === "approved" &&
+                  o.createdAt &&
+                  new Date(o.createdAt) >= weekStart &&
+                  new Date(o.createdAt) <= weekEnd
+              ).length;
+
+              weeklyApprovals.push({
+                name: `Week ${4 - week}`,
+                approvals,
+              });
+            }
+
+            // Stock health (last 6 months)
+            const stockHealth = [];
+            for (let month = 5; month >= 0; month--) {
+              const monthDate = new Date();
+              monthDate.setMonth(monthDate.getMonth() - month);
+              const monthStart = new Date(
+                monthDate.getFullYear(),
+                monthDate.getMonth(),
+                1
+              );
+              const monthEnd = new Date(
+                monthDate.getFullYear(),
+                monthDate.getMonth() + 1,
+                0
+              );
+
+              // Calculate average stock percentage (simplified)
+              const productsInMonth = managerProducts.filter(
+                (p) =>
+                  p.createdAt &&
+                  new Date(p.createdAt) <= monthEnd &&
+                  new Date(p.createdAt) >= monthStart
+              );
+              const avgStock =
+                productsInMonth.length > 0
+                  ? productsInMonth.reduce(
+                      (sum, p) => sum + (p.availableQuantity > 0 ? 95 : 0),
+                      0
+                    ) / productsInMonth.length
+                  : 90;
+
+              stockHealth.push({
+                name: monthDate.toLocaleString("default", { month: "short" }),
+                stock: Math.round(avgStock),
+                backorder: Math.round(100 - avgStock),
+              });
+            }
+
+            res.send({
+              counts: {
+                productsManaged: managerProducts.length,
+                pendingOrders,
+                approvedOrders,
+                lowStockItems,
+              },
+              weeklyApprovals,
+              stockHealth,
+            });
+          } catch (error) {
+            res.status(500).send({
+              message: "Error fetching manager overview",
+              error: error.message,
             });
           }
-
-          // Stock health (last 6 months)
-          const stockHealth = [];
-          for (let month = 5; month >= 0; month--) {
-            const monthDate = new Date();
-            monthDate.setMonth(monthDate.getMonth() - month);
-            const monthStart = new Date(
-              monthDate.getFullYear(),
-              monthDate.getMonth(),
-              1
-            );
-            const monthEnd = new Date(
-              monthDate.getFullYear(),
-              monthDate.getMonth() + 1,
-              0
-            );
-
-            // Calculate average stock percentage (simplified)
-            const productsInMonth = managerProducts.filter(
-              (p) =>
-                p.createdAt &&
-                new Date(p.createdAt) <= monthEnd &&
-                new Date(p.createdAt) >= monthStart
-            );
-            const avgStock =
-              productsInMonth.length > 0
-                ? productsInMonth.reduce(
-                    (sum, p) => sum + (p.availableQuantity > 0 ? 95 : 0),
-                    0
-                  ) / productsInMonth.length
-                : 90;
-
-            stockHealth.push({
-              name: monthDate.toLocaleString("default", { month: "short" }),
-              stock: Math.round(avgStock),
-              backorder: Math.round(100 - avgStock),
-            });
-          }
-
-          res.send({
-            counts: {
-              productsManaged: managerProducts.length,
-              pendingOrders,
-              approvedOrders,
-              lowStockItems,
-            },
-            weeklyApprovals,
-            stockHealth,
-          });
-        } catch (error) {
-          res.status(500).send({
-            message: "Error fetching manager overview",
-            error: error.message,
-          });
         }
-      });
+      );
 
       // Buyer Dashboard Overview
       app.get("/dashboard/buyer/overview", verifyFBToken, async (req, res) => {
         try {
           const actor = await requireActor(req, res);
           if (!actor) return;
-          if (!requireRoles(actor, res, ["buyer"], "Only buyers can access this"))
+          if (
+            !requireRoles(actor, res, ["buyer"], "Only buyers can access this")
+          )
             return;
 
           // Get buyer's orders
