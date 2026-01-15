@@ -28,7 +28,15 @@ admin.initializeApp({
 // Basic security and performance middlewares
 app.use(express.json());
 app.use(helmet());
-app.use(cors());
+
+// Enhanced CORS configuration for specific domains
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost:3000").split(",");
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 app.use(compression());
 
 // If running behind a proxy (like Heroku / Cloudflare), enable trust proxy
@@ -228,6 +236,17 @@ async function run() {
         // console.warn('Index creation warning:', idxErr.message);
       }
 
+      // Create indexes for products collection to optimize common queries
+      try {
+        await productCollection.createIndex({ category: 1 });
+        await productCollection.createIndex({ price: 1 });
+        await productCollection.createIndex({ createdAt: -1 });
+        await productCollection.createIndex({ category: 1, price: 1 });
+      } catch (idxErr) {
+        // Ignore index creation errors in case the index already exists or on restricted environments
+        // console.warn('Product index creation warning:', idxErr.message);
+      }
+
       // users related apis
       app.post("/users", async (req, res) => {
         const user = req.body;
@@ -322,6 +341,43 @@ async function run() {
         }
       });
 
+      // Update user profile (name, photoURL, etc.) - user can update their own profile
+      app.patch("/users/profile", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+
+          const { name, photoURL } = req.body;
+          const updates = {};
+          if (name) updates.name = name;
+          if (photoURL) updates.photoURL = photoURL;
+          updates.updatedAt = new Date();
+
+          if (Object.keys(updates).length === 0) {
+            return res.status(400).send({ message: "No valid fields to update" });
+          }
+
+          const result = await userCollection.updateOne(
+            { email: req.decoded_email },
+            { $set: updates }
+          );
+
+          if (result.matchedCount === 0) {
+            return res.status(404).send({ message: "User not found" });
+          }
+
+          res.send({
+            message: "Profile updated successfully",
+            updated: result.modifiedCount > 0,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error updating profile",
+            error: error.message,
+          });
+        }
+      });
+
       // admin - update user role / status
       app.patch("/users/:id/role", async (req, res) => {
         try {
@@ -373,7 +429,20 @@ async function run() {
           } = req.query;
           const query = {};
           if (createdBy) query.createdBy = createdBy;
-          if (category) query.category = category;
+          // Support both single category and array/list of categories
+          if (category) {
+            if (Array.isArray(category)) {
+              // Multiple categories: ?category[]=Shirt&category[]=Pant
+              query.category = { $in: category };
+            } else if (typeof category === "string" && category.includes(",")) {
+              // Comma-separated categories: ?category=Shirt,Pant,Jacket
+              const categoryArray = category.split(",").map((c) => c.trim());
+              query.category = { $in: categoryArray };
+            } else {
+              // Single category: ?category=Shirt
+              query.category = category;
+            }
+          }
           const priceFilter = {};
           if (minPrice) priceFilter.$gte = Number(minPrice);
           if (maxPrice) priceFilter.$lte = Number(maxPrice);
@@ -384,10 +453,9 @@ async function run() {
           // Add search functionality
           if (search) {
             query.$or = [
-              { name: { $regex: search, $options: "i" } },
-              { description: { $regex: search, $options: "i" } },
+              { productName: { $regex: search, $options: "i" } },
+              { productDescription: { $regex: search, $options: "i" } },
               { category: { $regex: search, $options: "i" } },
-              { brand: { $regex: search, $options: "i" } },
             ];
           }
 
@@ -431,7 +499,7 @@ async function run() {
         }
       });
 
-      // Product categories summary for homepage
+      // Product categories summary for homepage (MUST come before /:id route)
       app.get("/products/categories-summary", async (req, res) => {
         try {
           const pipeline = [
@@ -458,6 +526,63 @@ async function run() {
         } catch (error) {
           res.status(500).send({
             message: "Error fetching category summary",
+            error: error.message,
+          });
+        }
+      });
+
+      // Get single product by ID
+      app.get("/products/:id", async (req, res) => {
+        try {
+          const { id } = req.params;
+          if (!isValidObjectId(id)) {
+            return res.status(400).send({ message: "Invalid product ID" });
+          }
+
+          const product = await productCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!product) {
+            return res.status(404).send({ message: "Product not found" });
+          }
+
+          res.send(product);
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error fetching product", error: error.message });
+        }
+      });
+
+      // Get related products (same category, exclude self)
+      app.get("/products/:id/related", async (req, res) => {
+        try {
+          const { id } = req.params;
+          if (!isValidObjectId(id)) {
+            return res.status(400).send({ message: "Invalid product ID" });
+          }
+
+          const product = await productCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!product) {
+            return res.status(404).send({ message: "Product not found" });
+          }
+
+          const relatedProducts = await productCollection
+            .find({
+              category: product.category,
+              _id: { $ne: new ObjectId(id) },
+            })
+            .limit(4)
+            .toArray();
+
+          res.send({ products: relatedProducts });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching related products",
             error: error.message,
           });
         }
@@ -1075,10 +1200,17 @@ async function run() {
 
       app.get("/reviews", async (req, res) => {
         try {
-          const { status = "approved" } = req.query;
+          const { status = "approved", productId } = req.query;
           const query = {};
           if (status !== "all") {
             query.status = status;
+          }
+          if (productId) {
+            if (isValidObjectId(productId)) {
+              query.productId = productId;
+            } else {
+              return res.status(400).send({ message: "Invalid product ID" });
+            }
           }
 
           const reviews = await reviewCollection
@@ -1162,6 +1294,207 @@ async function run() {
         }
       });
 
+      // Post new FAQ (admin only)
+      app.post("/faqs", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can post FAQs"))
+            return;
+
+          const { question, answer, order = 0 } = req.body;
+
+          if (!question || !answer) {
+            return res
+              .status(400)
+              .send({ message: "Question and answer are required" });
+          }
+
+          const faq = {
+            question,
+            answer,
+            order,
+            isActive: true,
+            createdAt: new Date(),
+            createdBy: actor.email,
+          };
+
+          const result = await faqCollection.insertOne(faq);
+          res.send({ message: "FAQ posted successfully", faqId: result.insertedId });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error posting FAQ", error: error.message });
+        }
+      });
+
+      // Update FAQ (admin only)
+      app.patch("/faqs/:id", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can update FAQs"))
+            return;
+
+          const { id } = req.params;
+          if (!isValidObjectId(id))
+            return res.status(400).send({ message: "Invalid FAQ ID" });
+
+          const updates = req.body || {};
+          updates.updatedAt = new Date();
+
+          const result = await faqCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updates }
+          );
+
+          if (result.matchedCount === 0)
+            return res.status(404).send({ message: "FAQ not found" });
+
+          res.send({ message: "FAQ updated successfully" });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error updating FAQ", error: error.message });
+        }
+      });
+
+      // Delete FAQ (admin only)
+      app.delete("/faqs/:id", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can delete FAQs"))
+            return;
+
+          const { id } = req.params;
+          if (!isValidObjectId(id))
+            return res.status(400).send({ message: "Invalid FAQ ID" });
+
+          const result = await faqCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+
+          if (result.deletedCount === 0)
+            return res.status(404).send({ message: "FAQ not found" });
+
+          res.send({ message: "FAQ deleted successfully" });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error deleting FAQ", error: error.message });
+        }
+      });
+
+      // Post new blog (admin only)
+      app.post("/blogs", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can post blogs"))
+            return;
+
+          const {
+            title,
+            content,
+            excerpt,
+            author,
+            featuredImage,
+            category = "General",
+            isPublished = false,
+          } = req.body;
+
+          if (!title || !content) {
+            return res
+              .status(400)
+              .send({ message: "Title and content are required" });
+          }
+
+          const blog = {
+            title,
+            content,
+            excerpt: excerpt || content.substring(0, 200),
+            author: author || actor.displayName || actor.email,
+            featuredImage: featuredImage || "",
+            category,
+            isPublished,
+            createdAt: new Date(),
+            createdBy: actor.email,
+            publishedAt: isPublished ? new Date() : null,
+          };
+
+          const result = await blogCollection.insertOne(blog);
+          res.send({ message: "Blog posted successfully", blogId: result.insertedId });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error posting blog", error: error.message });
+        }
+      });
+
+      // Update blog (admin only)
+      app.patch("/blogs/:id", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can update blogs"))
+            return;
+
+          const { id } = req.params;
+          if (!isValidObjectId(id))
+            return res.status(400).send({ message: "Invalid blog ID" });
+
+          const updates = req.body || {};
+          updates.updatedAt = new Date();
+
+          // If publishing for the first time
+          if (updates.isPublished && !updates.publishedAt) {
+            updates.publishedAt = new Date();
+          }
+
+          const result = await blogCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updates }
+          );
+
+          if (result.matchedCount === 0)
+            return res.status(404).send({ message: "Blog not found" });
+
+          res.send({ message: "Blog updated successfully" });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error updating blog", error: error.message });
+        }
+      });
+
+      // Delete blog (admin only)
+      app.delete("/blogs/:id", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can delete blogs"))
+            return;
+
+          const { id } = req.params;
+          if (!isValidObjectId(id))
+            return res.status(400).send({ message: "Invalid blog ID" });
+
+          const result = await blogCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+
+          if (result.deletedCount === 0)
+            return res.status(404).send({ message: "Blog not found" });
+
+          res.send({ message: "Blog deleted successfully" });
+        } catch (error) {
+          res
+            .status(500)
+            .send({ message: "Error deleting blog", error: error.message });
+        }
+      });
+
       // High-level stats for homepage and dashboards
       app.get("/home-stats", async (req, res) => {
         try {
@@ -1184,6 +1517,324 @@ async function run() {
         } catch (error) {
           res.status(500).send({
             message: "Error fetching stats",
+            error: error.message,
+          });
+        }
+      });
+
+      // Admin Dashboard Overview
+      app.get("/dashboard/admin/overview", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["admin"], "Only admins can access this"))
+            return;
+
+          const { period = "7days" } = req.query;
+          const now = new Date();
+          let startDate = new Date();
+
+          if (period === "today") {
+            startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          } else if (period === "7days") {
+            startDate = new Date();
+            startDate.setDate(startDate.getDate() - 6);
+            startDate.setHours(0, 0, 0, 0);
+          } else if (period === "30days") {
+            startDate = new Date();
+            startDate.setDate(startDate.getDate() - 29);
+            startDate.setHours(0, 0, 0, 0);
+          }
+
+          // Get counts
+          const [
+            totalProducts,
+            productsInRange,
+            totalOrders,
+            ordersInRange,
+            totalUsers,
+            usersInRange,
+            activeManagers,
+          ] = await Promise.all([
+            productCollection.countDocuments(),
+            productCollection.countDocuments({
+              createdAt: { $gte: startDate },
+            }),
+            orderCollection.countDocuments(),
+            orderCollection.countDocuments({
+              createdAt: { $gte: startDate },
+            }),
+            userCollection.countDocuments(),
+            userCollection.countDocuments({
+              createdAt: { $gte: startDate },
+            }),
+            userCollection.countDocuments({
+              role: "manager",
+              status: "active",
+            }),
+          ]);
+
+          // Get orders this month
+          const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+          const ordersThisMonth = await orderCollection.countDocuments({
+            createdAt: { $gte: thisMonthStart },
+          });
+
+          // Role distribution
+          const roleDistribution = await userCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: "$role",
+                  count: { $sum: 1 },
+                },
+              },
+            ])
+            .toArray();
+
+          // Time-series data for orders
+          const dayCount = period === "today" ? 1 : period === "7days" ? 7 : 30;
+          const timeSeriesData = [];
+          for (let i = 0; i < dayCount; i++) {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + i);
+            const dayStart = new Date(date);
+            dayStart.setHours(0, 0, 0, 0);
+            const dayEnd = new Date(date);
+            dayEnd.setHours(23, 59, 59, 999);
+
+            const ordersCount = await orderCollection.countDocuments({
+              createdAt: { $gte: dayStart, $lte: dayEnd },
+            });
+
+            timeSeriesData.push({
+              date: dayStart.toISOString(),
+              label: `${dayStart.getMonth() + 1}/${dayStart.getDate()}`,
+              orders: ordersCount,
+            });
+          }
+
+          res.send({
+            counts: {
+              totalProducts,
+              productsInRange,
+              totalOrders,
+              ordersInRange,
+              ordersThisMonth,
+              totalUsers,
+              usersInRange,
+              activeManagers,
+            },
+            roleDistribution: roleDistribution.map((r) => ({
+              name: r._id || "buyer",
+              value: r.count,
+            })),
+            timeSeries: timeSeriesData,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching admin overview",
+            error: error.message,
+          });
+        }
+      });
+
+      // Manager Dashboard Overview
+      app.get("/dashboard/manager/overview", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["manager"], "Only managers can access this"))
+            return;
+
+          // Get manager's products
+          const managerProducts = await productCollection
+            .find({ createdBy: actor.email })
+            .toArray();
+
+          // Get orders for manager's products
+          const productIds = managerProducts.map((p) => p._id.toString());
+          const allOrders = await orderCollection.find({}).toArray();
+          const managerOrders = allOrders.filter((order) =>
+            productIds.includes(order.productId)
+          );
+
+          // Calculate stats
+          const pendingOrders = managerOrders.filter(
+            (o) => o.status === "pending"
+          ).length;
+          const approvedOrders = managerOrders.filter(
+            (o) => o.status === "approved" || o.status === "processing"
+          ).length;
+          const lowStockItems = managerProducts.filter(
+            (p) => p.availableQuantity < 10
+          ).length;
+
+          // Weekly approvals (last 4 weeks)
+          const weeklyApprovals = [];
+          for (let week = 3; week >= 0; week--) {
+            const weekStart = new Date();
+            weekStart.setDate(weekStart.getDate() - week * 7);
+            weekStart.setHours(0, 0, 0, 0);
+            const weekEnd = new Date(weekStart);
+            weekEnd.setDate(weekEnd.getDate() + 6);
+            weekEnd.setHours(23, 59, 59, 999);
+
+            const approvals = managerOrders.filter(
+              (o) =>
+                o.status === "approved" &&
+                o.createdAt &&
+                new Date(o.createdAt) >= weekStart &&
+                new Date(o.createdAt) <= weekEnd
+            ).length;
+
+            weeklyApprovals.push({
+              name: `Week ${4 - week}`,
+              approvals,
+            });
+          }
+
+          // Stock health (last 6 months)
+          const stockHealth = [];
+          for (let month = 5; month >= 0; month--) {
+            const monthDate = new Date();
+            monthDate.setMonth(monthDate.getMonth() - month);
+            const monthStart = new Date(
+              monthDate.getFullYear(),
+              monthDate.getMonth(),
+              1
+            );
+            const monthEnd = new Date(
+              monthDate.getFullYear(),
+              monthDate.getMonth() + 1,
+              0
+            );
+
+            // Calculate average stock percentage (simplified)
+            const productsInMonth = managerProducts.filter(
+              (p) =>
+                p.createdAt &&
+                new Date(p.createdAt) <= monthEnd &&
+                new Date(p.createdAt) >= monthStart
+            );
+            const avgStock =
+              productsInMonth.length > 0
+                ? productsInMonth.reduce(
+                    (sum, p) => sum + (p.availableQuantity > 0 ? 95 : 0),
+                    0
+                  ) / productsInMonth.length
+                : 90;
+
+            stockHealth.push({
+              name: monthDate.toLocaleString("default", { month: "short" }),
+              stock: Math.round(avgStock),
+              backorder: Math.round(100 - avgStock),
+            });
+          }
+
+          res.send({
+            counts: {
+              productsManaged: managerProducts.length,
+              pendingOrders,
+              approvedOrders,
+              lowStockItems,
+            },
+            weeklyApprovals,
+            stockHealth,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching manager overview",
+            error: error.message,
+          });
+        }
+      });
+
+      // Buyer Dashboard Overview
+      app.get("/dashboard/buyer/overview", verifyFBToken, async (req, res) => {
+        try {
+          const actor = await requireActor(req, res);
+          if (!actor) return;
+          if (!requireRoles(actor, res, ["buyer"], "Only buyers can access this"))
+            return;
+
+          // Get buyer's orders
+          const buyerOrders = await orderCollection
+            .find({ email: actor.email })
+            .toArray();
+
+          // Calculate stats
+          const totalOrders = buyerOrders.length;
+          const pendingOrders = buyerOrders.filter(
+            (o) => o.status === "pending"
+          ).length;
+          const completedOrders = buyerOrders.filter(
+            (o) => o.status === "delivered"
+          ).length;
+          const totalSpent = buyerOrders
+            .filter((o) => o.status === "delivered")
+            .reduce((sum, o) => sum + (o.totalPrice || 0), 0);
+
+          // Order status distribution
+          const statusCounts = buyerOrders.reduce((acc, order) => {
+            const status = order.status || "pending";
+            acc[status] = (acc[status] || 0) + 1;
+            return acc;
+          }, {});
+
+          const orderStatusData = Object.keys(statusCounts).map((status) => ({
+            name: status.charAt(0).toUpperCase() + status.slice(1),
+            value: statusCounts[status],
+          }));
+
+          // Spending trend (last 6 months)
+          const spendingTrend = [];
+          for (let month = 5; month >= 0; month--) {
+            const monthDate = new Date();
+            monthDate.setMonth(monthDate.getMonth() - month);
+            const monthStart = new Date(
+              monthDate.getFullYear(),
+              monthDate.getMonth(),
+              1
+            );
+            const monthEnd = new Date(
+              monthDate.getFullYear(),
+              monthDate.getMonth() + 1,
+              0
+            );
+
+            const monthOrders = buyerOrders.filter(
+              (o) =>
+                o.status === "delivered" &&
+                o.createdAt &&
+                new Date(o.createdAt) >= monthStart &&
+                new Date(o.createdAt) <= monthEnd
+            );
+
+            const monthSpending = monthOrders.reduce(
+              (sum, o) => sum + (o.totalPrice || 0),
+              0
+            );
+
+            spendingTrend.push({
+              month: monthDate.toLocaleString("default", { month: "short" }),
+              amount: monthSpending,
+            });
+          }
+
+          res.send({
+            counts: {
+              totalOrders,
+              pendingOrders,
+              completedOrders,
+              totalSpent,
+            },
+            orderStatusData,
+            spendingTrend,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Error fetching buyer overview",
             error: error.message,
           });
         }
